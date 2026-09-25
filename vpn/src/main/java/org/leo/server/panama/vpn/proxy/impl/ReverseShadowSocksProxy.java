@@ -1,7 +1,6 @@
 package org.leo.server.panama.vpn.proxy.impl;
 
 import io.netty.buffer.ByteBuf;
-import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.channel.nio.NioEventLoopGroup;
 import org.apache.log4j.Logger;
@@ -35,11 +34,16 @@ public class ReverseShadowSocksProxy extends ShadowSocksProxy {
 
     @Override
     protected void send2Client(byte[] data) {
+        if (!clientChannel.isActive()) {
+            closeTargetConnection();
+            onConnectClosed(redirectClient);
+            return;
+        }
         data = wrapper.wrap(data);
 
         // 返回的结果会添加tag标记，此tag为代理请求的tag
-        clientChannel.write(appendTagFunc.apply(data));
-        clientChannel.flush();
+        org.leo.server.panama.core.util.BoundedWrites.writeAndFlush(clientChannel, appendTagFunc.apply(data))
+                .addListener(future -> { if (!future.isSuccess()) { closeTargetConnection(); onConnectClosed(redirectClient); } });
         if (log.isDebugEnabled()) log.debug("client <----------------  proxy " + data.length + " byte");
     }
 

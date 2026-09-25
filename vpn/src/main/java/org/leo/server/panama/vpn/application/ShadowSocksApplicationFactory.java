@@ -1,7 +1,5 @@
 package org.leo.server.panama.vpn.application;
 
-import com.alibaba.fastjson.JSON;
-import com.alibaba.fastjson.serializer.SerializerFeature;
 import org.apache.log4j.Logger;
 import org.leo.server.panama.vpn.application.impl.InnerReverseShadowSocksApplication;
 import org.leo.server.panama.vpn.application.impl.NormalShadowSocksApplication;
@@ -46,8 +44,7 @@ public class ShadowSocksApplicationFactory {
                 panama +
                 ":: ShadowSocks - " + shadowSocksConfiguration.getMode() + "\n" +
                 ":: Port        - " + shadowSocksConfiguration.getPort() + "\n" +
-                ":: Type        - " + shadowSocksConfiguration.getType() + "\n" +
-                ":: Password    - " + shadowSocksConfiguration.getPassword());
+                ":: Type        - " + shadowSocksConfiguration.getType());
         shadowSocksApplication.start(shadowSocksConfiguration);
     }
 }

@@ -1,110 +1,76 @@
 package org.leo.server.panama.core.handler.websocket;
 
+import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
-import io.netty.handler.codec.http.HttpHeaderNames;
-import io.netty.handler.codec.http.HttpRequest;
+import io.netty.handler.codec.http.*;
 import io.netty.handler.codec.http.websocketx.*;
+import io.netty.util.ReferenceCountUtil;
 import org.leo.server.panama.core.connector.impl.NettyWebSocketRequest;
 import org.leo.server.panama.core.connector.impl.WebSocketUpgradeRequest;
 import org.leo.server.panama.core.handler.RequestHandler;
 import org.leo.server.panama.core.handler.http.HttpRequestHandler;
+import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
 
 public class HttpWebSocketRequestHandler extends HttpRequestHandler {
-    private RequestHandler webSocketHandler;
-    private StringBuilder stringBuilder;
-    private boolean isWebSocket;
-    private WebSocketUpgradeRequest webSocketUpgradeRequest;
+    private final RequestHandler webSocketHandler;
+    private ByteArrayOutputStream text;
+    private WebSocketUpgradeRequest upgrade;
 
-    public HttpWebSocketRequestHandler(RequestHandler requestHandler, RequestHandler webSocketHandler) {
-        super(requestHandler);
-        this.webSocketHandler = webSocketHandler;
+    public HttpWebSocketRequestHandler(RequestHandler http, RequestHandler webSocket) {
+        super(http); webSocketHandler = webSocket;
     }
-
-    @Override
-    public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
-        if (msg instanceof WebSocketFrame) {
-            if (null == stringBuilder) {
-                stringBuilder = new StringBuilder();
+    @Override protected void completeRequest(ChannelHandlerContext ctx, HttpRequest request, byte[] body) {
+        if (!request.headers().containsValue(HttpHeaderNames.CONNECTION, HttpHeaderValues.UPGRADE, true)
+                || !HttpHeaderValues.WEBSOCKET.contentEqualsIgnoreCase(request.headers().get(HttpHeaderNames.UPGRADE))) {
+            super.completeRequest(ctx, request, body); return;
+        }
+        FullHttpRequest full = new DefaultFullHttpRequest(request.protocolVersion(), request.method(), request.uri(), Unpooled.wrappedBuffer(body));
+        full.headers().set(request.headers());
+        try {
+            upgrade = new WebSocketUpgradeRequest(ctx, full);
+            upgrade.setMessage("");
+            doRequest(upgrade);
+        } finally { full.release(); }
+    }
+    @Override public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+        if (!(msg instanceof WebSocketFrame)) { super.channelRead(ctx, msg); return; }
+        WebSocketFrame frame = (WebSocketFrame) msg;
+        try {
+            if (frame instanceof PingWebSocketFrame) {
+                ctx.writeAndFlush(new PongWebSocketFrame(frame.content().retain())); return;
             }
-
-            isWebSocket = true;
-            handlerWebSocket(ctx, (WebSocketFrame)msg);
-            ctx.fireChannelRead(msg);
-        } else if (msg instanceof HttpRequest) {
-            if (needUpgrade2WS(ctx, (HttpRequest) msg)) {
-                doRequest(webSocketUpgradeRequest);
-            } else {
-                super.channelRead(ctx, msg);
+            if (frame instanceof PongWebSocketFrame) return;
+            if (frame instanceof CloseWebSocketFrame) {
+                text = null;
+                if (upgrade != null) { upgrade.setCloseWebSocketFrame((CloseWebSocketFrame) frame); upgrade.close(); }
+                else ctx.close();
+                return;
             }
-        } else {
-            ctx.fireChannelRead(msg);
-        }
-    }
-
-    @Override
-    public void channelReadComplete(ChannelHandlerContext ctx) throws Exception {
-        if (isWebSocket) {
-            if (stringBuilder != null) {
-                NettyWebSocketRequest nettyWebSocketRequest = new NettyWebSocketRequest(ctx, new TextWebSocketFrame(stringBuilder.toString()));
-                nettyWebSocketRequest.setMessage(nettyWebSocketRequest.message());
-                webSocketHandler.doRequest(nettyWebSocketRequest);
-                stringBuilder = null;
+            if (frame instanceof TextWebSocketFrame) {
+                if (text != null) throw new IllegalArgumentException("Overlapping fragmented text messages");
+                text = new ByteArrayOutputStream();
+            } else if (!(frame instanceof ContinuationWebSocketFrame) || text == null) {
+                throw new IllegalArgumentException("Unsupported WebSocket frame");
             }
-
-            ctx.fireChannelReadComplete();
-        } else {
-            super.channelReadComplete(ctx);
-        }
-    }
-
-    @Override
-    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
-        isWebSocket = false;
-        stringBuilder = null;
-        super.exceptionCaught(ctx, cause);
-    }
-
-    private boolean needUpgrade2WS(ChannelHandlerContext ctx, HttpRequest httpRequest) {
-        // 判断是否升级websocke
-        if (null == httpRequest.headers()) {
-            return false;
-        }
-
-        String upData = httpRequest.headers().get(HttpHeaderNames.CONNECTION);
-        String upMehod = httpRequest.headers().get(HttpHeaderNames.UPGRADE);
-        if (null != upData
-                && upData.equalsIgnoreCase("upgrade")
-                && upMehod.equalsIgnoreCase("websocket")) {
-            webSocketUpgradeRequest = new WebSocketUpgradeRequest(ctx, httpRequest);
-            webSocketUpgradeRequest.setMessage("");
-            return true;
-        }
-
-        return false;
-    }
-
-    private void handlerWebSocket(ChannelHandlerContext ctx, WebSocketFrame frame) {
-        // 判断是否关闭链路的指令
-        if (frame instanceof CloseWebSocketFrame) {
-            if (null != webSocketUpgradeRequest) {
-                webSocketUpgradeRequest.setCloseWebSocketFrame((CloseWebSocketFrame) frame);
-                webSocketUpgradeRequest.close();
-            } else {
-                ctx.close();
+            int length = frame.content().readableBytes();
+            if (length > MAX_MESSAGE_LENGTH - text.size()) throw new IllegalArgumentException("WebSocket message too large");
+            byte[] data = new byte[length]; frame.content().readBytes(data); text.write(data, 0, data.length);
+            if (frame.isFinalFragment()) {
+                String message = new String(text.toByteArray(), StandardCharsets.UTF_8); text = null;
+                TextWebSocketFrame complete = new TextWebSocketFrame(message);
+                try {
+                    NettyWebSocketRequest request = new NettyWebSocketRequest(ctx, complete);
+                    request.setMessage(message);
+                    webSocketHandler.doRequest(request);
+                } finally { complete.release(); }
             }
-
-            return;
-        }
-
-        // 判断是否ping消息
-        if (frame instanceof PingWebSocketFrame) {
-            ctx.channel().write(new PongWebSocketFrame(frame.content().retain()));
-            return;
-        }
-
-        // 文本消息，不支持二进制消息
-        if (frame instanceof TextWebSocketFrame) {
-            stringBuilder.append(((TextWebSocketFrame)frame).text());
-        }
+        } finally { ReferenceCountUtil.release(frame); }
+    }
+    @Override public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+        text = null; upgrade = null; super.channelInactive(ctx);
+    }
+    @Override public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+        text = null; super.exceptionCaught(ctx, cause);
     }
 }

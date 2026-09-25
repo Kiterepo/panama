@@ -38,8 +38,8 @@ public class AgentShadowSocksProxy extends AbstractShadowSocksProxy {
             data = wrapper.wrap(data);
         }
 
-        clientChannel.write(Unpooled.wrappedBuffer(data));
-        clientChannel.flush();
+        org.leo.server.panama.core.util.BoundedWrites.writeAndFlush(clientChannel, Unpooled.wrappedBuffer(data))
+                .addListener(io.netty.channel.ChannelFutureListener.CLOSE_ON_FAILURE);
         if (log.isDebugEnabled()) log.debug("client <----------------  proxy " + data.length + " byte");
     }
 

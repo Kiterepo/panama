@@ -10,12 +10,12 @@ import org.leo.server.panama.client.ClientResponseDelegate;
 import org.leo.server.panama.client.tcp.TCPClient;
 import org.leo.server.panama.core.connector.impl.TCPResponse;
 
-import java.util.Arrays;
+import java.io.ByteArrayOutputStream;
 
 public class TCPClientHandler extends ChannelInboundHandlerAdapter {
     private ClientResponseDelegate clientResponseDelegate;
     private TCPClient tcpClient;
-    private byte []completeData;
+    private ByteArrayOutputStream completeData;
 
     public TCPClientHandler(TCPClient tcpClient, ClientResponseDelegate clientResponseDelegate) {
         this.clientResponseDelegate = clientResponseDelegate;
@@ -30,18 +30,14 @@ public class TCPClientHandler extends ChannelInboundHandlerAdapter {
     @Override
     public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
         byte []readData = read(ctx, msg);
+        if (clientResponseDelegate == null) return;
         if (clientResponseDelegate.shouldDoPerResponse()) {
             clientResponseDelegate.doPerResponse(tcpClient, new TCPResponse(readData));
         }
 
         if (clientResponseDelegate.shouldDoCompleteResponse()) {
-            if (null == completeData || completeData.length == 0) {
-                completeData = readData;
-            } else {
-                int start = completeData.length;
-                completeData = Arrays.copyOf(completeData, completeData.length + readData.length);
-                System.arraycopy(readData, 0, completeData, start, readData.length);
-            }
+            if (completeData == null) completeData = new ByteArrayOutputStream(readData.length);
+            completeData.write(readData, 0, readData.length);
         }
 
 //        super.channelRead(ctx, msg);
@@ -56,7 +52,7 @@ public class TCPClientHandler extends ChannelInboundHandlerAdapter {
             }
 
             if (null != clientResponseDelegate) {
-                clientResponseDelegate.doCompleteResponse(tcpClient, new TCPResponse(completeData));
+                clientResponseDelegate.doCompleteResponse(tcpClient, new TCPResponse(completeData.toByteArray()));
             }
 
             completeData = null;
@@ -78,8 +74,12 @@ public class TCPClientHandler extends ChannelInboundHandlerAdapter {
 
     @Override
     public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+        completeData = null;
+        if (tcpClient.getConnectFuture() == null || tcpClient.getConnectFuture().channel() == ctx.channel()) {
+            tcpClient.setClose(true);
+            if (clientResponseDelegate != null) clientResponseDelegate.onConnectClosed(tcpClient);
+        }
         super.channelInactive(ctx);
-        clientResponseDelegate.onConnectClosed(tcpClient);
     }
 
     protected byte[] read(ChannelHandlerContext ctx, Object msg) {

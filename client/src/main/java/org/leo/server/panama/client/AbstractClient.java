@@ -9,8 +9,9 @@ import java.net.InetSocketAddress;
 
 public abstract class AbstractClient implements Client {
     private volatile boolean close = true;
-    private ChannelFuture connectFuture;
+    private volatile ChannelFuture connectFuture;
     private EventLoopGroup workGroup;
+    private final java.util.concurrent.atomic.AtomicLong pendingBytes = new java.util.concurrent.atomic.AtomicLong();
 
     public AbstractClient(EventLoopGroup eventLoopGroup) {
         this.workGroup = eventLoopGroup;
@@ -52,7 +53,7 @@ public abstract class AbstractClient implements Client {
         close = false;
         connectFuture = bootstrap.connect(address);
         connectFuture.addListener(future -> {
-            if (!future.isSuccess()) close = true;
+            if (!future.isSuccess() && connectFuture == future) close = true;
         });
         return connectFuture;
     }
@@ -63,12 +64,18 @@ public abstract class AbstractClient implements Client {
     public void send(byte []data, int timeout) {
         ChannelFuture connection = connectFuture;
         if (connection == null || close || data.length == 0) return;
-        // Keep writes ordered behind connection establishment; never block an event loop.
+        if (pendingBytes.addAndGet(data.length) > org.leo.server.panama.core.util.BoundedWrites.MAX_PENDING_BYTES) {
+            pendingBytes.addAndGet(-data.length);
+            close();
+            return;
+        }
+        // Includes data queued while DNS/connection establishment is pending.
         connection.addListener((ChannelFutureListener) future -> {
-            if (future.isSuccess() && future.channel().isActive()) {
+            if (future.isSuccess() && future.channel().isActive() && !close) {
                 future.channel().writeAndFlush(Unpooled.wrappedBuffer(data))
+                        .addListener(done -> pendingBytes.addAndGet(-data.length))
                         .addListener(ChannelFutureListener.CLOSE_ON_FAILURE);
-            }
+            } else pendingBytes.addAndGet(-data.length);
         });
     }
 

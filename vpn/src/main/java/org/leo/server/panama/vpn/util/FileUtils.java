@@ -1,101 +1,30 @@
 package org.leo.server.panama.vpn.util;
 
-import org.apache.log4j.Logger;
-
 import java.io.*;
-import java.util.stream.Collectors;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.*;
 
-/**
- * @author xuyangze
- * @date 2019/6/7 12:02 PM
- */
-public class FileUtils {
-    private final static Logger log = Logger.getLogger(FileUtils.class);
-
-    private static File CURRENT = new File("");
-
+public final class FileUtils {
+    /** defaultValue is retained for source compatibility; unreadable configuration fails closed. */
     public static String read(String fileName, String defaultValue) {
-        String currentPath = getCurrentPath();
-        if (null == currentPath || currentPath.length() == 0) {
-            return null;
-        }
-
-        File file = new File(currentPath + "/" + fileName);
-        if (!file.exists()) {
-            try {
-                if (!file.createNewFile()) {
-                    log.error("create config file false");
-                    return null;
-                }
-
-                writeToFile(file, defaultValue);
-                return defaultValue;
-            } catch (Exception e) {
-                log.error("create config file error", e);
-            }
-        }
-
+        Path path = Paths.get(fileName).toAbsolutePath().normalize();
         try {
-            FileInputStream fileInputStream = new FileInputStream(file);
-            BufferedReader bufferedReader = new BufferedReader(new InputStreamReader(fileInputStream));
-            String result = bufferedReader.lines().map(value -> value + "\n").collect(Collectors.joining());
-            if (null == result || result.length() == 0) {
-                writeToFile(file, defaultValue);
-                return defaultValue;
-            }
-
-            return result;
-        } catch (Exception e) {
-            log.error("read config file error", e);
+            String content = new String(Files.readAllBytes(path), StandardCharsets.UTF_8);
+            if (content.trim().isEmpty()) throw new IllegalArgumentException("Empty configuration: " + path);
+            return content;
+        } catch (IOException error) {
+            throw new IllegalArgumentException("Cannot read configuration: " + path, error);
         }
-
-        log.error("read config file error, use default value");
-        return defaultValue;
     }
-
-    public static String getCurrentPath() {
-        try {
-            return CURRENT.getCanonicalPath();
-        } catch (IOException e) {
-            log.error("can not read current path", e);
-        }
-
-        return null;
-    }
-
+    public static String getCurrentPath() { return Paths.get("").toAbsolutePath().normalize().toString(); }
     public static String readFromResource(String file) {
-        InputStream inputStream = Thread.currentThread().getContextClassLoader().getResourceAsStream(file);
-        if (null == inputStream) {
-            return "";
-        }
-
-        BufferedReader bufferedReader = new BufferedReader(new InputStreamReader(inputStream));
-        String result = bufferedReader.lines().map(value -> value + "\n").collect(Collectors.joining());
-
-        return result;
-    }
-
-    private static void writeToFile(File file, String value) {
-        FileOutputStream fileOutputStream = null;
-        try {
-            fileOutputStream = new FileOutputStream(file);
-            for (byte aByte : value.getBytes()) {
-                fileOutputStream.write(aByte);
-            }
-        } catch (Exception e) {
-            log.error("write to file error", e);
-        }  finally {
-            if (null != fileOutputStream) {
-                try {
-                    fileOutputStream.close();
-                } catch (Exception e) {
-                    log.error("close fileOutputStream error", e);
-                }
-            }
-        }
-    }
-
-    public static void main(String []args) {
-        System.out.println(read("panama.config", "hello world"));
+        try (InputStream in = Thread.currentThread().getContextClassLoader().getResourceAsStream(file)) {
+            if (in == null) return "";
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            byte[] buffer = new byte[4096];
+            int count;
+            while ((count = in.read(buffer)) != -1) out.write(buffer, 0, count);
+            return new String(out.toByteArray(), StandardCharsets.UTF_8);
+        } catch (IOException error) { throw new IllegalStateException("Cannot read resource: " + file, error); }
     }
 }

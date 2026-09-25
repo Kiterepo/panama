@@ -161,7 +161,7 @@ public class ShadowSocksConfiguration {
     }
 
     public boolean isProxyEqualsCurrent() {
-        return Objects.equals(proxyType, type) && Objects.equals(proxyPassword, password);
+        return Objects.equals(getProxyType(), getType()) && Objects.equals(getProxyPassword(), getPassword());
     }
 
     public String getMode() {
@@ -174,5 +174,33 @@ public class ShadowSocksConfiguration {
 
     public void setMode(String mode) {
         this.mode = mode;
+    }
+    public void validate() {
+        String mode = getMode();
+        if (ShadowSocksModeEnum.formMode(mode) == null) throw new IllegalArgumentException("Unknown mode: " + mode);
+        if (!"inner".equals(mode)) checkPort(getPort());
+        if ("proxy".equals(mode)) {
+            if (getProxy() == null || getProxy().trim().isEmpty()) throw new IllegalArgumentException("proxy is required");
+            checkPort(getProxyPort());
+        }
+        if ("inner".equals(mode) || "outer".equals(mode)) checkPort(getReversePort());
+        if ("inner".equals(mode) && (getReverseHost() == null || getReverseHost().trim().isEmpty()))
+            throw new IllegalArgumentException("reverseHost is required");
+        if ("outer".equals(mode) && getPort() == getReversePort())
+            throw new IllegalArgumentException("port and reversePort must differ");
+        if (!java.util.Arrays.asList("raw", "encrypt", "compress", "zero-padding", "random-padding").contains(getEncrypt()))
+            throw new IllegalArgumentException("Unknown transport wrapper");
+        if ("encrypt".equals(getEncrypt())) {
+            checkCipher(getType(), getPassword());
+            if ("proxy".equals(mode) || "outer".equals(mode)) checkCipher(getProxyType(), getProxyPassword());
+        }
+    }
+    private static void checkPort(int port) {
+        if (port < 1 || port > 65535) throw new IllegalArgumentException("Port must be between 1 and 65535");
+    }
+    private static void checkCipher(String type, String password) {
+        if (!java.util.Arrays.asList("aes-128-cfb", "aes-192-cfb", "aes-256-cfb", "aes-128-ofb", "aes-192-ofb", "aes-256-ofb", "bf-cfb").contains(type))
+            throw new IllegalArgumentException("Unsupported cipher: " + type);
+        if (password == null || password.isEmpty()) throw new IllegalArgumentException("Password is required");
     }
 }

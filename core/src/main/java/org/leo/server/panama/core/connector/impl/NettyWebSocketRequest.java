@@ -6,7 +6,7 @@ import org.leo.server.panama.core.connector.Response;
 import org.leo.server.panama.core.method.RequestMethod;
 
 public class NettyWebSocketRequest extends NettyRequest implements WebSocketRequest {
-    private TextWebSocketFrame textWebSocketFrame;
+    private String text;
 
     public NettyWebSocketRequest() {
         super();
@@ -14,12 +14,12 @@ public class NettyWebSocketRequest extends NettyRequest implements WebSocketRequ
 
     public NettyWebSocketRequest(ChannelHandlerContext ctx, TextWebSocketFrame textWebSocketFrame) {
         super(ctx);
-        this.textWebSocketFrame = textWebSocketFrame;
+        this.text = textWebSocketFrame.text();
     }
 
     @Override
     public String message() {
-        return textWebSocketFrame.text();
+        return text;
     }
 
     @Override

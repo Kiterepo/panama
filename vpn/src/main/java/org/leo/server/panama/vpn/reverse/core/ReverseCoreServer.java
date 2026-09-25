@@ -1,8 +1,7 @@
 package org.leo.server.panama.vpn.reverse.core;
 
-import com.google.common.cache.Cache;
 import io.netty.channel.*;
-import org.apache.log4j.Logger;
+import io.netty.util.AttributeKey;
 import org.leo.server.panama.core.connector.impl.TCPRequest;
 import org.leo.server.panama.core.handler.RequestHandler;
 import org.leo.server.panama.core.handler.tcp.TCPRequestHandler;
@@ -11,151 +10,106 @@ import org.leo.server.panama.util.NumberUtils;
 import org.leo.server.panama.vpn.reverse.constant.ReverseConstants;
 import org.leo.server.panama.vpn.reverse.protocol.ReverseProtocol;
 import org.leo.server.panama.vpn.util.Callback;
-import org.leo.server.panama.vpn.util.LocalCacheFactory;
-import org.leo.server.panama.vpn.util.MD5;
-
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Random;
-import java.util.concurrent.locks.ReadWriteLock;
-import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.*;
 import java.util.function.Consumer;
-import java.util.function.Supplier;
 
-/**
- * 反向代理服务端，作为服务端存在外网服务器中
- * 内网客户端连接到此端口，并维持一条稳定的连接
- * 代理服务器请求后发起网络请求，然后回调给代理服务器
- * 由于复用一条连接，所有的请求带上tag标记，判断是否属于同一个请求
- * @author xuyangze
- * @date 2018/11/21 3:17 PM
- */
+/** Each stream stays on its selected tunnel for its entire lifetime. */
 public class ReverseCoreServer extends TCPServer implements RequestHandler<TCPRequest> {
-    private final static Logger log = Logger.getLogger(ReverseCoreServer.class);
+    private static final AttributeKey<ReverseProtocol.Decoder> DECODER =
+            AttributeKey.valueOf(ReverseCoreServer.class, "decoder");
+    private static final int MAX_STREAMS = 20000;
+    private final List<Channel> channels = new ArrayList<>();
+    private final Map<Integer, Stream> streams = new HashMap<>();
+    private int nextChannel;
 
-    private RandomList<Channel> channels = new RandomList();
-    private ReadWriteLock readWriteLock = new ReentrantReadWriteLock();
-    private Cache<Integer, Consumer<byte []>> tag2ConsumerMap = LocalCacheFactory.createCache(60 * 1000 * 5, 20000);
-    private Cache<Integer, Callback> tag2ClosedMap = LocalCacheFactory.createCache(60 * 1000 * 5, 20000);
+    public ReverseCoreServer(int port) { super(port); }
 
-    private ReverseProtocol.ReverseProtocolData lastUnCompleteReverseProtocolData;
-
-    public ReverseCoreServer(int port) {
-        super(port);
-    }
-
-    public void send2Client(int tag, byte []data, Consumer<byte []> callback, Callback closed) {
-        // 获取一条连接
-        Channel channel = read(() -> channels.select());
-        if (null == channel) {
-            log.error("proxy --------!-------> target: 0 inner found");
-            return;
-        }
-
-        // 生成tag
-        if (null != callback) {
-            tag2ConsumerMap.put(tag, callback);
-        }
-
-        if (null != closed) {
-            tag2ClosedMap.put(tag, closed);
-        }
-
-        // 由于复用同一条连接，所有的请求应当带上标记
-        channel.writeAndFlush(ReverseProtocol.encodeProtocol(tag, data));
-    }
-
-    @Override
-    protected void setupPipeline(ChannelPipeline pipeline) {
-        pipeline.addLast(new TCPRequestHandler(this));
-    }
-
-    @Override
-    public void onConnect(ChannelHandlerContext ctx) {
-        log.info("a new client connected to reverse server");
-        write(() -> channels.add(ctx.channel()));
-    }
-
-    @Override
-    public void doRequest(TCPRequest request) {
-        List<ReverseProtocol.ReverseProtocolData> reverseProtocolDatas = ReverseProtocol.decodeProtocol(request.getData(), lastUnCompleteReverseProtocolData);
-        lastUnCompleteReverseProtocolData = null;
-
-        if (null == reverseProtocolDatas || reverseProtocolDatas.size() == 0) {
-            log.error("reverseProtocolDatas is empty, but data size is: " + request.getData().length);
-            return;
-        }
-
-        reverseProtocolDatas.forEach(reverseProtocolData -> this.doRequest(reverseProtocolData));
-    }
-
-    @Override
-    public void onClose(ChannelHandlerContext ctx) {
-        write(() -> channels.remove(ctx.channel()));
-        for (Callback callback : tag2ClosedMap.asMap().values()) {
-            callback.call();
-        }
-
-        lastUnCompleteReverseProtocolData = null;
-        tag2ClosedMap.invalidateAll();
-        tag2ConsumerMap.invalidateAll();
-    }
-
-    private void doRequest(ReverseProtocol.ReverseProtocolData reverseProtocolData) {
-        if (!reverseProtocolData.isComplete()) {
-            lastUnCompleteReverseProtocolData = reverseProtocolData;
-            return;
-        }
-
-        int tag = reverseProtocolData.getTag();
-        byte[] data = reverseProtocolData.getData();
-        Consumer<byte []> consumer = tag2ConsumerMap.getIfPresent(tag);
-        if (null != consumer) {
-            if (data.length != 4) {
-                consumer.accept(data);
-            } else {
-                int closeFlag = NumberUtils.byteArrayToInt(data);
-                if (closeFlag == ReverseConstants.CLOSE_MAGIC) {
-                    Callback callback = tag2ClosedMap.getIfPresent(tag);
-                    if (null != callback) {
-                        tag2ConsumerMap.invalidate(tag);
-                        tag2ClosedMap.invalidate(tag);
-                        callback.call();
-                    }
-                } else {
-                    consumer.accept(data);
+    public void send2Client(int tag, byte[] data, Consumer<byte[]> callback, Callback closed) {
+        // Retain the old close control frame so existing peers remain compatible.
+        if (isClose(data) && callback == null) { closeStream(tag); return; }
+        Stream stream;
+        synchronized (this) {
+            stream = streams.get(tag);
+            if (stream == null && callback != null && streams.size() < MAX_STREAMS) {
+                channels.removeIf(channel -> !channel.isActive());
+                if (!channels.isEmpty()) {
+                    Channel channel = channels.get(Math.floorMod(nextChannel++, channels.size()));
+                    stream = new Stream(channel, callback, closed);
+                    streams.put(tag, stream);
                 }
             }
         }
-    }
-
-    private <T> T read(Supplier<T> supplier) {
-        try {
-            readWriteLock.readLock().lock();
-            return supplier.get();
-        } finally {
-            readWriteLock.readLock().unlock();
+        if (stream == null) { if (closed != null) closed.call(); return; }
+        final Stream selected = stream;
+        synchronized (this) {
+            if (streams.get(tag) != selected) return;
+            if (!selected.channel.isActive()) { failStream(tag, selected, false); return; }
+            org.leo.server.panama.core.util.BoundedWrites.writeAndFlush(selected.channel,
+                    ReverseProtocol.encodeDataProtocol(tag, data))
+                    .addListener(future -> { if (!future.isSuccess()) failStream(tag, selected, true); });
         }
     }
 
-    private <T> T write(Supplier<T> supplier) {
-        try {
-            readWriteLock.writeLock().lock();
-            return supplier.get();
-        } finally {
-            readWriteLock.writeLock().unlock();
-        }
+    public void closeStream(int tag) {
+        Stream stream;
+        synchronized (this) { stream = streams.remove(tag); }
+        if (stream != null) sendClose(stream.channel, tag);
     }
 
-    public class RandomList<T> extends ArrayList<T> {
-        private Random rand = new Random(47);
+    private void failStream(int tag, Stream expected, boolean notifyPeer) {
+        synchronized (this) {
+            if (!streams.remove(tag, expected)) return;
+        }
+        if (notifyPeer) sendClose(expected.channel, tag);
+        if (expected.closed != null) expected.closed.call();
+    }
 
-        public T select() {
-            if (this.size() > 0) {
-                return get(0);
+    private void sendClose(Channel channel, int tag) {
+        if (channel.isActive()) org.leo.server.panama.core.util.BoundedWrites.writeAndFlush(channel, ReverseProtocol.encodeProtocol(tag,
+                NumberUtils.intToByteArray(ReverseConstants.CLOSE_MAGIC)))
+                .addListener(ChannelFutureListener.CLOSE_ON_FAILURE);
+    }
+
+    @Override protected void setupPipeline(ChannelPipeline pipeline) {
+        pipeline.addLast(new TCPRequestHandler(this));
+    }
+    @Override public synchronized void onConnect(ChannelHandlerContext ctx) {
+        ctx.channel().attr(DECODER).set(new ReverseProtocol.Decoder());
+        channels.add(ctx.channel());
+    }
+    @Override public void doRequest(TCPRequest request) {
+        Channel channel = request.getChannelHandlerContext().channel();
+        for (ReverseProtocol.ReverseProtocolData frame : channel.attr(DECODER).get().feed(request.getData())) {
+            Stream stream;
+            synchronized (this) { stream = streams.get(frame.getTag()); }
+            // A different inner server must never inject bytes into this stream.
+            if (stream == null || stream.channel != channel) continue;
+            if (isClose(frame.getData())) failStream(frame.getTag(), stream, false);
+            else stream.consumer.accept(frame.getData());
+        }
+    }
+    @Override public void onClose(ChannelHandlerContext ctx) {
+        List<Stream> removed = new ArrayList<>();
+        synchronized (this) {
+            channels.remove(ctx.channel());
+            Iterator<Stream> iterator = streams.values().iterator();
+            while (iterator.hasNext()) {
+                Stream stream = iterator.next();
+                if (stream.channel == ctx.channel()) { removed.add(stream); iterator.remove(); }
             }
-
-            return null;
+        }
+        ctx.channel().attr(DECODER).set(null);
+        for (Stream stream : removed) if (stream.closed != null) stream.closed.call();
+    }
+    public static boolean isClose(byte[] data) {
+        return data.length == 4 && NumberUtils.byteArrayToInt(data) == ReverseConstants.CLOSE_MAGIC;
+    }
+    private static final class Stream {
+        final Channel channel;
+        final Consumer<byte[]> consumer;
+        final Callback closed;
+        Stream(Channel channel, Consumer<byte[]> consumer, Callback closed) {
+            this.channel = channel; this.consumer = consumer; this.closed = closed;
         }
     }
 }

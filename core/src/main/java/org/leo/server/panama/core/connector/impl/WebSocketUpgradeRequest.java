@@ -12,11 +12,17 @@ import org.leo.server.panama.core.method.RequestMethod;
 public class WebSocketUpgradeRequest extends NettyHttpRequest {
     private WebSocketServerHandshaker webSocketServerHandshaker;
     private ChannelHandlerContext context;
+    private final byte[] upgradeBody;
     private CloseWebSocketFrame closeWebSocketFrame;
 
     public WebSocketUpgradeRequest(ChannelHandlerContext ctx, HttpRequest request) {
         super(ctx, request);
         this.context = ctx;
+        if (request instanceof io.netty.handler.codec.http.FullHttpRequest) {
+            io.netty.buffer.ByteBuf content = ((io.netty.handler.codec.http.FullHttpRequest) request).content();
+            upgradeBody = new byte[content.readableBytes()];
+            content.getBytes(content.readerIndex(), upgradeBody);
+        } else upgradeBody = new byte[0];
     }
 
     @Override
@@ -33,7 +39,12 @@ public class WebSocketUpgradeRequest extends NettyHttpRequest {
                 if (webSocketServerHandshaker == null) {
                     WebSocketServerHandshakerFactory.sendUnsupportedVersionResponse(context.channel());
                 } else {
-                    webSocketServerHandshaker.handshake(context.channel(), this);
+                    // May be called after the inbound request buffer has been released.
+                    io.netty.handler.codec.http.FullHttpRequest full = new io.netty.handler.codec.http.DefaultFullHttpRequest(
+                            protocolVersion(), method(), uri(), io.netty.buffer.Unpooled.wrappedBuffer(upgradeBody));
+                    full.headers().set(headers());
+                    try { webSocketServerHandshaker.handshake(context.channel(), full); }
+                    finally { full.release(); }
                 }
             } else {
                 HttpResponse httpResponse = new HttpResponse(response.getMessage());

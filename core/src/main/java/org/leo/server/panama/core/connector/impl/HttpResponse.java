@@ -49,9 +49,8 @@ public class HttpResponse implements Response {
 
         if (null == this.header) {
             this.header = new HashMap<String, Object>();
-        } else {
-            this.header.put(key, value);
         }
+        this.header.put(key, value);
     }
 
     public boolean isZip() {

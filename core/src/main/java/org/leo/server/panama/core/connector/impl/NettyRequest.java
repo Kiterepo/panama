@@ -46,7 +46,7 @@ public abstract class NettyRequest extends FunctionAttributeRequest implements R
 
     @Override
     public String clientIp() {
-        return insocket.getHostName();
+        return insocket.getAddress() == null ? insocket.getHostString() : insocket.getAddress().getHostAddress();
     }
 
     @Override

@@ -50,7 +50,7 @@ public class NettyHttpRequest extends NettyRequest implements HttpRequest {
         String message = response.getMessage();
         if (response instanceof HttpResponse) {
             HttpResponse hRes = (HttpResponse)response;
-            if (null != hRes.getHeader() && !hRes.getMessage().isEmpty()) {
+            if (null != hRes.getHeader() && !hRes.getHeader().isEmpty()) {
                 header.putAll(hRes.getHeader());
             }
 
@@ -66,7 +66,7 @@ public class NettyHttpRequest extends NettyRequest implements HttpRequest {
 
         byte []data = EMPTY;
         if (null != message && message.length() != 0) {
-            data = message.getBytes();
+            data = message.getBytes(java.nio.charset.StandardCharsets.UTF_8);
         }
 
         if (HttpHeaderValues.GZIP.equals(header.get(HttpHeaderNames.CONTENT_ENCODING))) {
@@ -96,7 +96,9 @@ public class NettyHttpRequest extends NettyRequest implements HttpRequest {
             httpResponse.headers().set(entry.getKey().toString(), entry.getValue());
         }
 
-        writeMsg(httpResponse);
+        if (HttpHeaderValues.CLOSE.equals(header.get(HttpHeaderNames.CONNECTION))) {
+            getChannelHandlerContext().writeAndFlush(httpResponse).addListener(io.netty.channel.ChannelFutureListener.CLOSE);
+        } else writeMsg(httpResponse);
     }
 
     @Override

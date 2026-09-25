@@ -2,95 +2,76 @@ package org.leo.server.panama.vpn.reverse.core;
 
 import io.netty.channel.*;
 import io.netty.channel.nio.NioEventLoopGroup;
-import org.apache.log4j.Logger;
+import io.netty.channel.socket.nio.NioDatagramChannel;
+import io.netty.resolver.dns.DnsAddressResolverGroup;
+import io.netty.resolver.dns.DnsServerAddressStreamProviders;
 import org.leo.server.panama.client.Client;
 import org.leo.server.panama.client.ClientResponseDelegate;
 import org.leo.server.panama.client.handler.TCPClientHandler;
 import org.leo.server.panama.client.tcp.TCPClient;
 import org.leo.server.panama.core.connector.impl.TCPResponse;
-
 import java.net.InetSocketAddress;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ScheduledFuture;
 import java.util.function.Consumer;
 
-/**
- * 反向代理客户端，发送请求到代理端，代理端返回数据
- * 服务端向被代理端进行长链接，服务端维持和代理端的连接
- * 代理端收到客户端请求，通过长链接发送请求到服务端
- * 服务端转发请求到服务端的ss端口，请求返回后返回给代理端
- * @author xuyangze
- * @date 2018/11/21 3:17 PM
- */
+/** Async reconnects are serialized on one owned event loop; explicit shutdown never reconnects. */
 public class ReverseCoreClient extends TCPClient implements ClientResponseDelegate<TCPResponse> {
-    private final static Logger log = Logger.getLogger(ReverseCoreClient.class);
+    private final EventLoopGroup group;
+    private final InetSocketAddress address;
+    private final Consumer<byte[]> consumer;
+    private final Runnable disconnected;
+    private final DnsAddressResolverGroup resolver = new DnsAddressResolverGroup(
+            NioDatagramChannel.class, DnsServerAddressStreamProviders.platformDefault());
+    private ScheduledFuture<?> retry;
+    private volatile boolean stopped;
+    private boolean started;
 
-    private InetSocketAddress address;
-    private Consumer<byte []> consumer;
-
-    private EventLoop scheduleEventLoop = new DefaultEventLoop();
-
-    public ReverseCoreClient(InetSocketAddress address, Consumer<byte []> consumer) {
-        super(new NioEventLoopGroup(1), null);
-        this.address = address;
-        this.consumer = consumer;
+    public ReverseCoreClient(InetSocketAddress address, Consumer<byte[]> consumer) {
+        this(address, consumer, () -> {});
     }
-
-    public Channel channel() {
-        return getConnectFuture().channel();
+    public ReverseCoreClient(InetSocketAddress address, Consumer<byte[]> consumer, Runnable disconnected) {
+        this(new NioEventLoopGroup(1), address, consumer, disconnected);
     }
-
-    @Override
-    public Client connect(InetSocketAddress inetSocketAddress) {
-        log.info("ReverseCoreClient try connect to server: " + address.getHostName());
-        return tryConnect();
+    private ReverseCoreClient(EventLoopGroup group, InetSocketAddress address, Consumer<byte[]> consumer, Runnable disconnected) {
+        super(group, null);
+        this.group = group; this.address = address; this.consumer = consumer; this.disconnected = disconnected;
     }
-
-    @Override
-    protected void setupPipeline(ChannelPipeline pipeline) {
+    public Channel channel() { return getConnectFuture() == null ? null : getConnectFuture().channel(); }
+    @Override public synchronized Client connect(InetSocketAddress ignored) {
+        if (stopped) return this;
+        group.next().execute(() -> { if (!started && !stopped) { started = true; tryConnect(); } });
+        return this;
+    }
+    private void tryConnect() {
+        retry = null;
+        if (stopped) return;
+        ChannelFuture connection = connectAsync(address, resolver);
+        connection.addListener(future -> { if (!future.isSuccess()) scheduleRetry(); });
+    }
+    private void scheduleRetry() {
+        if (!stopped && retry == null) retry = group.next().schedule(this::tryConnect, 3, TimeUnit.SECONDS);
+    }
+    @Override protected void setupPipeline(ChannelPipeline pipeline) {
         pipeline.addLast(new TCPClientHandler(this, this));
     }
-
-    @Override
-    public boolean shouldDoPerResponse() {
-        return false;
-    }
-
-    @Override
-    public boolean shouldDoCompleteResponse() {
-        return true;
-    }
-
-    @Override
-    public void onResponseComplete(Client client) {
-
-    }
-
-    @Override
-    public void doCompleteResponse(Client client, TCPResponse response) {
-        consumer.accept(response.getData());
-    }
-
-    @Override
-    public void doPerResponse(Client client, TCPResponse response) {
-
-    }
-
-    @Override
-    public void onConnectClosed(Client client) {
-        log.info("connect closed to server: " + address.getHostName());
+    @Override public boolean shouldDoPerResponse() { return true; }
+    @Override public boolean shouldDoCompleteResponse() { return false; }
+    @Override public void doPerResponse(Client client, TCPResponse response) { consumer.accept(response.getData()); }
+    @Override public void onConnectClosed(Client client) {
         setClose(true);
-        tryConnect();
+        disconnected.run();
+        scheduleRetry();
     }
-
-    private Client tryConnect() {
-        Client client = super.connect(address);
-        if (null != client) {
-            log.info("connect success to server: " + address.getHostName());
-        } else {
-            log.info("connect failed to server: " + address.getHostName());
-            scheduleEventLoop.schedule(() -> this.tryConnect(), 3, TimeUnit.SECONDS);
-        }
-
-        return client;
+    public synchronized io.netty.util.concurrent.Future<?> shutdown() {
+        if (stopped) return group.terminationFuture();
+        stopped = true;
+        group.next().execute(() -> {
+            if (retry != null) retry.cancel(false);
+            super.close();
+            resolver.close();
+        });
+        return group.shutdownGracefully(0, 2, TimeUnit.SECONDS);
     }
+    @Override public void close() { if (!stopped) shutdown(); }
 }

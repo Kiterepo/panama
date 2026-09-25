@@ -5,8 +5,10 @@
 ---
 1.java 8或者以上版本<br>
 2.下载panama.jar或者使用maven3以上进行打包，生成panama.jar<br>
-3.在panama.jar同级目录下配置panama.config<br>
-4.执行命令java -jar panama.jar<br>
+3.在启动命令的当前目录下配置panama.config，或通过命令行指定配置文件的绝对路径<br>
+4.执行命令java -jar panama.jar，或 java -jar panama.jar /absolute/path/panama.config<br>
+
+配置文件不存在、不可读或为空时会停止启动并报错。全模式修复、测试覆盖和兼容性限制见 [排雷说明](docs/project-hardening.md)。
 
 panama.config:
 ```

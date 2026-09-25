@@ -40,7 +40,9 @@ public class ZeroPaddingWrapper extends PaddingWrapper {
 
     @Override
     public byte[] unwrap(byte[] bytes) {
+        if (bytes.length < headerLength) throw new IllegalArgumentException("Truncated padding header");
         int paddingSize = KeyHelper.toBigEndianInteger(Arrays.copyOfRange(bytes, 0, headerLength));
+        if (paddingSize < headerLength || paddingSize > bytes.length) throw new IllegalArgumentException("Invalid padding length");
         return Arrays.copyOfRange(bytes, paddingSize, bytes.length);
     }
 }

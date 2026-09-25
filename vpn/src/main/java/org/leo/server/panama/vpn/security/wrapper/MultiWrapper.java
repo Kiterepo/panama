@@ -26,6 +26,7 @@ public class MultiWrapper extends Wrapper {
         // unwrap: (wrapN ... (wrap1 (wrap0 (data
         for (int i = 0; i < wrappers.length; i++) {
             tmp = wrappers[wrappers.length - i - 1].unwrap(tmp);
+            if (tmp.length == 0) return tmp;
         }
         return tmp;
     }

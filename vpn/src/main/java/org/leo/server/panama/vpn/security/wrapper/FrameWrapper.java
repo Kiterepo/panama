@@ -1,214 +1,85 @@
 package org.leo.server.panama.vpn.security.wrapper;
 
-import org.leo.server.panama.vpn.security.chipher.KeyHelper;
 import java.io.ByteArrayOutputStream;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
+import org.leo.server.panama.vpn.security.chipher.KeyHelper;
 
+/** Incremental decoder for the existing continuation/final-frame wire format. */
 public class FrameWrapper extends Wrapper {
-    private ByteArrayOutputStream wrapBuffer;
-    private ByteArrayOutputStream unwrapBuffer;
-    private List<byte[]> unwrapFrames;
-    private int frameLength;
-    private int reservedHeaderLength;
-    private Wrapper frameHandler;
+    public static final int MAX_PACKET_LENGTH = 8 * 1024 * 1024;
+    private final int frameLength;
+    private final int reservedHeaderLength;
+    private final Wrapper frameHandler;
+    private final ByteArrayOutputStream packet = new ByteArrayOutputStream();
+    private int delimiter = -1;
+    private int lengthBytes;
+    private int decodedLength;
+    private int remaining = -1;
 
-
-    /*
-     * notice that the fixed-frame-length does not require a accurate
-     * fixed data. It will work in a pure variable frame mode if this
-     * parameter is set to a large number.
-     */
-    public FrameWrapper(int fixedFrameLength) {
-        if (fixedFrameLength < 4) {
-            throw new RuntimeException("bad fixed-frame length < 4");
-        }
-        this.wrapBuffer = new ByteArrayOutputStream();
-        this.unwrapBuffer = new ByteArrayOutputStream();
-        this.unwrapFrames = new ArrayList<>();
-        this.frameLength = fixedFrameLength - 1;
-        if (fixedFrameLength < 0xFF)
-            reservedHeaderLength = 1;
-        else if (fixedFrameLength < 0xFFFF - 2)
-            reservedHeaderLength = 2;
-        else if (fixedFrameLength < 0xFFFFFF - 3)
-            reservedHeaderLength = 3;
-        else
-            reservedHeaderLength = 4;
-    }
-
-    /**
-     * frameHandler will be invoked before the frame re-concat into
-     * data stream, see unwrap().
-     */
+    public FrameWrapper(int fixedFrameLength) { this(fixedFrameLength, null); }
     public FrameWrapper(int fixedFrameLength, Wrapper frameHandler) {
-        this(fixedFrameLength);
+        if (fixedFrameLength < 4 || fixedFrameLength > MAX_PACKET_LENGTH)
+            throw new IllegalArgumentException("Invalid fixed frame length");
+        this.frameLength = fixedFrameLength - 1;
         this.frameHandler = frameHandler;
+        reservedHeaderLength = fixedFrameLength < 0xFF ? 1 : fixedFrameLength < 0xFFFF - 2 ? 2
+                : fixedFrameLength < 0xFFFFFF - 3 ? 3 : 4;
     }
-
-    /*
-     * data will be wrapped into several frames, but marked as a whole
-     * chunk (we call it a data-package)
-     */
-    @Override
-    public byte[] wrap(final byte[] bytes) {
-        byte[] payload;
-        if (frameHandler == null) {
-            payload = bytes;
-        } else {
-            payload = frameHandler.wrap(bytes);
+    @Override public byte[] wrap(byte[] bytes) {
+        byte[] payload = frameHandler == null ? bytes : frameHandler.wrap(bytes);
+        if (payload.length > MAX_PACKET_LENGTH) throw new IllegalArgumentException("Frame packet too large");
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        int offset = 0;
+        while (payload.length - offset > frameLength) {
+            out.write(1); out.write(payload, offset, frameLength); offset += frameLength;
         }
-        int i, nof = (payload.length / frameLength) + (payload.length % frameLength == 0 ? 0 : 1);
-        for (i = 0; i < nof - 1; i++) {
-            wrapBuffer.write(1);
-            wrapBuffer.write(payload, i * frameLength, frameLength);
-        }
-        wrapBuffer.write(0);
-        wrapBuffer.write(KeyHelper.getBytes(reservedHeaderLength, payload.length - i * frameLength), 0, reservedHeaderLength);
-        wrapBuffer.write(payload, i * frameLength, payload.length - i * frameLength);
-        byte[] wrappedBytes = wrapBuffer.toByteArray();
-        wrapBuffer.reset();
-        return wrappedBytes;
+        out.write(0);
+        byte[] size = KeyHelper.getBytes(reservedHeaderLength, payload.length - offset);
+        out.write(size, 0, size.length);
+        out.write(payload, offset, payload.length - offset);
+        return out.toByteArray();
     }
-
-    /*
-     * notice that the subscribe below was outdated
-     *
-     * data will not completely return if the received data is incomplete,
-     * it will be held into the unwrap-buffer until the rest part are received;
-     * if the incoming data are concatenated, it will return a data-package a time.
-     * if no complete data (includes unwrap-buffer) is received, return null.
-     *
-     * notice that the unwrap methods affects each other because of their
-     * usages of the same unwrap-buffer, please use one of these methods
-     * from beginning to end.
-     */
-    @Override
-    public byte[] unwrap(final byte[] bytes) {
-        byte[] ret;
-        if (frameHandler == null) {
-            ret = unwrapAll(bytes);
-        } else {
-            ByteArrayOutputStream stream = new ByteArrayOutputStream();
-            unwrapFrames(bytes).forEach(e -> unwrapFrames.add(frameHandler.unwrap(e)));
-            unwrapFrames.forEach(e -> stream.write(e, 0, e.length));
-            unwrapFrames.clear();
-            ret = stream.toByteArray();
+    @Override public byte[] unwrap(byte[] bytes) {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        for (byte[] frame : unwrapFrames(bytes)) {
+            byte[] data = frameHandler == null ? frame : frameHandler.unwrap(frame);
+            out.write(data, 0, data.length);
         }
-        return ret.length > 0 ? ret : null;
-        /*
-        unwrapFrames(bytes).forEach(e -> unwrapFrames.add(e));
-        if (unwrapFrames.size() > 0) {
-            return unwrapFrames.remove(0);
-        } else {
-            return null;
-        }
-        */
+        return out.toByteArray();
     }
-
-    /*
-     * return all complete data-packages in a byte array, incomplete data will be sent
-     * into buffer, two or more concatenated packs will be merged into one.
-     *
-     * notice that the unwrap methods affects each other because of their
-     * usages of the same unwrap-buffer, please use one of these methods
-     * from beginning to end.
-     */
     public byte[] unwrapAll(byte[] bytes) {
-        byte[] data = new byte[unwrapBuffer.size() + bytes.length];
-        System.arraycopy(unwrapBuffer.toByteArray(), 0, data, 0, unwrapBuffer.size());
-        System.arraycopy(bytes, 0, data, unwrapBuffer.size(), bytes.length);
-        unwrapBuffer.reset();
-        ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
-        int pos = 0, limit = pos + 1 + frameLength, size = data.length;
-        while (pos < size) {
-            byte[] buffer;
-            switch (data[pos]) {
-                case 0:
-                    limit = Math.min(limit + 1 + frameLength + 1, size);
-                    buffer = Arrays.copyOfRange(data, pos, limit);
-                    if (buffer.length < 1 + reservedHeaderLength) {
-                        unwrapBuffer.write(buffer, 0, buffer.length);
-                        // frame-len was truncated
-                        return outputStream.toByteArray();
-                    }
-                    int endFrameLength = KeyHelper.toBigEndianInteger(Arrays.copyOfRange(buffer, 1, 1 + reservedHeaderLength));
-                    if (buffer.length < 1 + reservedHeaderLength + endFrameLength) {
-                        unwrapBuffer.write(buffer, 0, buffer.length);
-                        // data was truncated
-                        return outputStream.toByteArray();
-                    } else {
-                        outputStream.write(buffer, 1 + reservedHeaderLength, endFrameLength);
-                        pos += 1 + reservedHeaderLength + endFrameLength;
-                        limit = pos + 1 + frameLength;
-                    }
-                    break;
-                case 1:
-                    buffer = Arrays.copyOfRange(data, pos, limit);
-                    outputStream.write(buffer, 1, buffer.length - 1);
-                    pos += 1 + frameLength;
-                    limit = Math.min(limit + 1 + frameLength, data.length);
-                    break;
-                default:
-                    throw new RuntimeException("unknown delimiter " + data[pos]);
-            }
-        }
-        return outputStream.toByteArray();
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        for (byte[] data : unwrapFrames(bytes)) out.write(data, 0, data.length);
+        return out.toByteArray();
     }
-
-    /*
-     * if the incoming data are concatenated, it will return all complete
-     * data-package a time.
-     *
-     * notice that the unwrap methods affects each other because of their
-     * usages of the same unwrap-buffer, please use one of these methods
-     * from beginning to end.
-     */
     public List<byte[]> unwrapFrames(byte[] bytes) {
-        List<byte[]> ret = new ArrayList<>();
-
-        byte[] data = new byte[unwrapBuffer.size() + bytes.length];
-        System.arraycopy(unwrapBuffer.toByteArray(), 0, data, 0, unwrapBuffer.size());
-        System.arraycopy(bytes, 0, data, unwrapBuffer.size(), bytes.length);
-        unwrapBuffer.reset();
-        ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
-        int pos = 0, limit = pos + 1 + frameLength, size = data.length;
-        while (pos < size) {
-            byte[] buffer;
-            switch (data[pos]) {
-                case 0:
-                    limit = Math.min(limit + 1 + frameLength + 1, size);
-                    buffer = Arrays.copyOfRange(data, pos, limit);
-                    if (buffer.length < 1 + reservedHeaderLength) {
-                        unwrapBuffer.write(buffer, 0, buffer.length);
-                        // frame-len was truncated
-                        return ret;
-                    }
-                    int endFrameLength = KeyHelper.toBigEndianInteger(Arrays.copyOfRange(buffer, 1, 1 + reservedHeaderLength));
-                    if (buffer.length < 1 + reservedHeaderLength + endFrameLength) {
-                        unwrapBuffer.write(buffer, 0, buffer.length);
-                        // data was truncated
-                        return ret;
-                    } else {
-                        outputStream.write(buffer, 1 + reservedHeaderLength, endFrameLength);
-                        ret.add(outputStream.toByteArray());
-                        outputStream.reset();
-                        pos += 1 + reservedHeaderLength + endFrameLength;
-                        limit = pos + 1 + frameLength;
-                    }
-                    break;
-                case 1:
-                    buffer = Arrays.copyOfRange(data, pos, limit);
-                    outputStream.write(buffer, 1, buffer.length - 1);
-                    pos += 1 + frameLength;
-                    limit = Math.min(limit + 1 + frameLength, data.length);
-                    break;
-                default:
-                    throw new RuntimeException("unknown delimiter " + data[pos]);
+        List<byte[]> result = new ArrayList<>();
+        int offset = 0;
+        while (offset < bytes.length) {
+            if (delimiter == -1) {
+                delimiter = bytes[offset++] & 255;
+                if (delimiter != 0 && delimiter != 1) throw new IllegalArgumentException("Invalid frame delimiter");
+                remaining = delimiter == 1 ? frameLength : -1;
+                lengthBytes = 0; decodedLength = 0;
+            }
+            if (remaining == -1) {
+                while (lengthBytes < reservedHeaderLength && offset < bytes.length) {
+                    decodedLength = (decodedLength << 8) | (bytes[offset++] & 255);
+                    lengthBytes++;
+                }
+                if (lengthBytes != reservedHeaderLength) break;
+                if (decodedLength < 0 || decodedLength > frameLength) throw new IllegalArgumentException("Invalid final frame length");
+                remaining = decodedLength;
+            }
+            int count = Math.min(remaining, bytes.length - offset);
+            if (count > MAX_PACKET_LENGTH - packet.size()) throw new IllegalArgumentException("Frame packet too large");
+            packet.write(bytes, offset, count); offset += count; remaining -= count;
+            if (remaining == 0) {
+                if (delimiter == 0) { result.add(packet.toByteArray()); packet.reset(); }
+                delimiter = -1;
             }
         }
-        return ret;
+        return result;
     }
-
 }

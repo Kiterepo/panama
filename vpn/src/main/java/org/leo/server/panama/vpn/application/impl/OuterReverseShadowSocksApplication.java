@@ -17,8 +17,10 @@ import java.io.IOException;
 public class OuterReverseShadowSocksApplication implements ShadowSocksApplication {
     @Override
     public void start(ShadowSocksConfiguration shadowSocksConfiguration) {
-        Server server = new TCPServer(shadowSocksConfiguration.getPort(), new Redirect2ReverseShadowSocksRequestHandler(shadowSocksConfiguration));
-        server.start(VPNConstant.MAX_SERVER_THREAD_COUNT);
+        try (Redirect2ReverseShadowSocksRequestHandler handler = new Redirect2ReverseShadowSocksRequestHandler(shadowSocksConfiguration)) {
+            Server server = new TCPServer(shadowSocksConfiguration.getPort(), handler);
+            server.start(VPNConstant.MAX_SERVER_THREAD_COUNT);
+        }
     }
 
     public static void main(String []args) throws IOException {

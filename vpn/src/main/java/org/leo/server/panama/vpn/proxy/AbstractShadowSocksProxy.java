@@ -38,6 +38,7 @@ public abstract class AbstractShadowSocksProxy implements ClientResponseDelegate
     protected Wrapper wrapper;
     protected Client redirectClient;
     protected Callback finish;
+    private final java.util.concurrent.atomic.AtomicLong pendingResponses = new java.util.concurrent.atomic.AtomicLong();
     // 发送请求给代理服务器
     protected NioEventLoopGroup eventLoopGroup;
 
@@ -68,6 +69,26 @@ public abstract class AbstractShadowSocksProxy implements ClientResponseDelegate
 
     @Override
     public void doPerResponse(Client client, TCPResponse response) {
+        if (!clientChannel.eventLoop().inEventLoop()) {
+            int length = response.getData().length;
+            if (pendingResponses.addAndGet(length) > org.leo.server.panama.core.util.BoundedWrites.MAX_PENDING_BYTES) {
+                pendingResponses.addAndGet(-length);
+                client.close();
+                return;
+            }
+            try {
+                clientChannel.eventLoop().execute(() -> {
+                    try { doPerResponse(client, response); }
+                    catch (RuntimeException error) { client.close(); clientChannel.close(); }
+                    finally { pendingResponses.addAndGet(-length); }
+                });
+            } catch (java.util.concurrent.RejectedExecutionException stopped) {
+                pendingResponses.addAndGet(-length);
+                client.close();
+            }
+            return;
+        }
+        if (!clientChannel.isActive()) return;
         // target -> proxy -> client
         if (log.isDebugEnabled()) log.debug(" proxy <---------------- target " + response.getData().length + " byte");
         send2Client(response.getData());
@@ -75,6 +96,11 @@ public abstract class AbstractShadowSocksProxy implements ClientResponseDelegate
 
     @Override
     public void onConnectClosed(Client client) {
+        if (!clientChannel.eventLoop().inEventLoop()) {
+            try { clientChannel.eventLoop().execute(() -> onConnectClosed(client)); }
+            catch (java.util.concurrent.RejectedExecutionException stopped) { clientChannel.close(); }
+            return;
+        }
         // send close data
         log.info("client <----------------  proxy closed");
         if (null != finish) {
@@ -91,7 +117,7 @@ public abstract class AbstractShadowSocksProxy implements ClientResponseDelegate
     protected void send2Client(byte []data) {
         data = wrapper.wrap(data);
         if (data.length == 0) return;
-        clientChannel.writeAndFlush(Unpooled.wrappedBuffer(data))
+        org.leo.server.panama.core.util.BoundedWrites.writeAndFlush(clientChannel, Unpooled.wrappedBuffer(data))
                 .addListener(ChannelFutureListener.CLOSE_ON_FAILURE);
         if (log.isDebugEnabled()) log.debug("client <----------------  proxy " + data.length + " byte");
     }

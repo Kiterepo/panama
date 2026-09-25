@@ -47,7 +47,8 @@ public abstract class AttributeRequest implements Attribute, Request {
         }
 
         if (null == value) {
-            attributeMap.remove(value);
+            attributeMap.remove(name);
+            return;
         }
 
         attributeMap.put(name, value);

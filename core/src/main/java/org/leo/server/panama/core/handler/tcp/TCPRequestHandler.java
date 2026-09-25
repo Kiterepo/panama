@@ -67,8 +67,7 @@ public class TCPRequestHandler extends ChannelInboundHandlerAdapter {
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
         data = null;
         ctx.writeAndFlush(Unpooled.EMPTY_BUFFER).addListener(ChannelFutureListener.CLOSE);
-        requestHandler.onClose(ctx);
-        super.exceptionCaught(ctx, cause);
+        // channelInactive owns lifecycle notification.
     }
 
     protected void doRequest(Request request) {

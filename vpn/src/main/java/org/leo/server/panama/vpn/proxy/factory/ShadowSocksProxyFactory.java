@@ -3,7 +3,6 @@ package org.leo.server.panama.vpn.proxy.factory;
 import io.netty.channel.Channel;
 import io.netty.channel.nio.NioEventLoopGroup;
 import org.leo.server.panama.vpn.configuration.ShadowSocksConfiguration;
-import org.leo.server.panama.vpn.constant.VPNConstant;
 import org.leo.server.panama.vpn.proxy.TCPProxy;
 import org.leo.server.panama.vpn.proxy.impl.*;
 import org.leo.server.panama.vpn.reverse.core.ReverseCoreServer;
@@ -16,23 +15,16 @@ import org.leo.server.panama.vpn.util.Callback;
  */
 public class ShadowSocksProxyFactory {
     // 发送请求给代理服务器
-    private static NioEventLoopGroup eventLoopGroup = new NioEventLoopGroup(VPNConstant.MAX_CLIENT_THREAD_COUNT);
+    private static final NioEventLoopGroup eventLoopGroup = null; // Relays use their inbound channel event loop.
 
     // 代理服务请求返回数据解析
     private static ShadowsocksRequestResolver requestResolver = new ShadowsocksRequestResolver();
 
-    // 创建反向代理服务器
-    private static ReverseCoreServer reverseCoreServer;
-
-    /**
-     * 开启反向代理服务
-     */
-    public static void createReverseServer(ShadowSocksConfiguration shadowSocksConfiguration) {
-        reverseCoreServer = new ReverseCoreServer(shadowSocksConfiguration.getReversePort());
-
-        new Thread(() -> {
-            reverseCoreServer.start(100);
-        }).start();
+    /** Bind before accepting client traffic; each outer application owns its tunnel server. */
+    public static ReverseCoreServer createReverseServer(ShadowSocksConfiguration configuration) {
+        ReverseCoreServer server = new ReverseCoreServer(configuration.getReversePort());
+        server.bind(1).syncUninterruptibly();
+        return server;
     }
 
     public static TCPProxy createRePlayShadowSocksProxy(Channel channel, Callback callback, ShadowSocksConfiguration shadowSocksConfiguration) {
@@ -55,7 +47,7 @@ public class ShadowSocksProxyFactory {
                 requestResolver);
     }
 
-    public static TCPProxy createRedirect2ReverseShadowSocksProxy(Channel channel, Callback callback, ShadowSocksConfiguration shadowSocksConfiguration) {
+    public static TCPProxy createRedirect2ReverseShadowSocksProxy(Channel channel, Callback callback, ShadowSocksConfiguration shadowSocksConfiguration, ReverseCoreServer reverseCoreServer) {
         // 反向代理TCP服务
         return new Redirect2ReverseShadowSocksProxy(
                 channel,

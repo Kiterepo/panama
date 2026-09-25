@@ -91,7 +91,8 @@ public class Panama {
         serverMap.put(serverName, server);
         Thread serverThread = new Thread(() -> {
             log.info("panama server start: " + serverName + " at port:" + server.port() + " maxThread: " + maxThread);
-            server.start(maxThread);
+            try { server.start(maxThread); }
+            finally { serverMap.remove(serverName, server); }
         });
 
         serverThread.setName(serverName + " Server Thread");
@@ -102,6 +103,7 @@ public class Panama {
         Server server = serverMap.get(serverName);
         if (null != server) {
             server.shutdown().get();
+            serverMap.remove(serverName, server);
         }
     }
 
