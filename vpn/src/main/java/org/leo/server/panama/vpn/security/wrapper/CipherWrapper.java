@@ -10,6 +10,8 @@ public class CipherWrapper extends Wrapper {
     private final Cipher decipher;
     private byte[] encipherIv;
     private byte[] decipherIv;
+    private int decipherIvBytes;
+    private boolean decipherInitialized;
 
     public CipherWrapper(Cipher encipher, Cipher decipher) {
         if (encipher.getClass() != decipher.getClass())
@@ -35,18 +37,21 @@ public class CipherWrapper extends Wrapper {
 
     @Override
     public byte[] unwrap(final byte[] bytes) {
-        if (decipherIv == null) {
+        int offset = 0;
+        if (!decipherInitialized) {
             int ivLength = decipher.getIVLength();
-            if (bytes.length < ivLength) {
-                throw new RuntimeException("invalid encrypted data, bytes.length: " + bytes.length + " ivLength: " + ivLength);
+            if (decipherIv == null) {
+                decipherIv = new byte[ivLength];
             }
-
-            this.decipherIv = Arrays.copyOfRange(bytes, 0, ivLength);
+            offset = Math.min(bytes.length, ivLength - decipherIvBytes);
+            System.arraycopy(bytes, 0, decipherIv, decipherIvBytes, offset);
+            decipherIvBytes += offset;
+            if (decipherIvBytes < ivLength) {
+                return new byte[0];
+            }
             decipher.init(false, decipherIv);
-            byte[] encryptedBytes = new byte[bytes.length - ivLength];
-            System.arraycopy(bytes, ivLength, encryptedBytes, 0, encryptedBytes.length);
-            return decipher.decrypt(encryptedBytes);
+            decipherInitialized = true;
         }
-        return decipher.decrypt(bytes);
+        return decipher.decrypt(offset == 0 ? bytes : Arrays.copyOfRange(bytes, offset, bytes.length));
     }
 }

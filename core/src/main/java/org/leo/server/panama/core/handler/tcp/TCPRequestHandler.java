@@ -9,12 +9,12 @@ import io.netty.util.ReferenceCountUtil;
 import org.leo.server.panama.core.connector.Request;
 import org.leo.server.panama.core.connector.impl.TCPRequest;
 import org.leo.server.panama.core.handler.RequestHandler;
-import java.util.Arrays;
+import java.io.ByteArrayOutputStream;
 
 public class TCPRequestHandler extends ChannelInboundHandlerAdapter {
 
     private Request request;
-    private byte []data;
+    private ByteArrayOutputStream data;
     private RequestHandler requestHandler;
 
     public TCPRequestHandler(RequestHandler requestHandler) {
@@ -41,13 +41,8 @@ public class TCPRequestHandler extends ChannelInboundHandlerAdapter {
         }
 
         byte []readData = read(ctx, msg);
-        if (null == data || data.length == 0) {
-            data = readData;
-        } else {
-            int start = data.length;
-            data = Arrays.copyOf(data, start + readData.length);
-            System.arraycopy(readData, 0, data, start, readData.length);
-        }
+        if (data == null) data = new ByteArrayOutputStream(readData.length);
+        data.write(readData, 0, readData.length);
 
 //        super.channelRead(ctx, msg);
     }
@@ -59,11 +54,11 @@ public class TCPRequestHandler extends ChannelInboundHandlerAdapter {
             return;
         }
 
-        request.setData(data);
-        doRequest(request);
-
+        Request completeRequest = request;
+        completeRequest.setData(data.toByteArray());
         request = null;
         data = null;
+        doRequest(completeRequest);
 
         super.channelReadComplete(ctx);
     }
@@ -84,14 +79,9 @@ public class TCPRequestHandler extends ChannelInboundHandlerAdapter {
         ByteBuf byteBuf = (ByteBuf) msg;
 
         try {
-            if (!byteBuf.hasArray()) {
-                byte []dataSequence = new byte[byteBuf.readableBytes()];
-                byteBuf.readBytes(dataSequence);
-
-                return dataSequence;
-            }
-
-            return null;
+            byte[] dataSequence = new byte[byteBuf.readableBytes()];
+            byteBuf.readBytes(dataSequence);
+            return dataSequence;
         } finally {
             ReferenceCountUtil.release(byteBuf);
         }

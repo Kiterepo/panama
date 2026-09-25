@@ -74,7 +74,6 @@ public class TCPClientHandler extends ChannelInboundHandlerAdapter {
         cause.printStackTrace();
         ctx.writeAndFlush(Unpooled.EMPTY_BUFFER).addListener(ChannelFutureListener.CLOSE);
         super.exceptionCaught(ctx, cause);
-        clientResponseDelegate.onConnectClosed(tcpClient);
     }
 
     @Override
@@ -87,14 +86,9 @@ public class TCPClientHandler extends ChannelInboundHandlerAdapter {
         ByteBuf byteBuf = (ByteBuf) msg;
 
         try {
-            if (!byteBuf.hasArray()) {
-                byte []dataSequence = new byte[byteBuf.readableBytes()];
-                byteBuf.readBytes(dataSequence);
-
-                return dataSequence;
-            }
-
-            return null;
+            byte[] dataSequence = new byte[byteBuf.readableBytes()];
+            byteBuf.readBytes(dataSequence);
+            return dataSequence;
         } finally {
             ReferenceCountUtil.release(byteBuf);
         }

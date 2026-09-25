@@ -42,12 +42,18 @@ public class ShadowsocksRequestResolver extends AbstractRequestResolver {
             return Arrays.copyOfRange(bytes, 3, bytes.length);
     }
 
+    /** Returns null when the supplied TCP prefix does not yet contain a complete header. */
     @Override
     public ShadowSocksRequest parse(byte[] bytes) {
         boolean udp = false;
         ShadowSocksRequest.Type atyp;
         String host;
         int port, subsequentDataLength;
+
+        // TCP reads do not preserve packet boundaries. Null means more header bytes are needed.
+        if (bytes.length == 0 || (bytes[0] == 0 && bytes.length == 1)) {
+            return null;
+        }
 
         // mark udp payload
         if (bytes[0] == 0) {
@@ -57,6 +63,7 @@ public class ShadowsocksRequestResolver extends AbstractRequestResolver {
 
         switch (bytes[0]) {
             case Socks5.ATYP_IPV4:
+                if (bytes.length < 7) return null;
                 atyp = ShadowSocksRequest.Type.IPV4;
                 host = "" + (bytes[1] & 0xff) + "." + (bytes[2] & 0xff)
                         + "." + (bytes[3] & 0xff) + "." + (bytes[4] & 0xff);
@@ -65,12 +72,16 @@ public class ShadowsocksRequestResolver extends AbstractRequestResolver {
                 break;
             case Socks5.ATYP_DOMAIN:
                 atyp = ShadowSocksRequest.Type.DOMAIN;
+                if (bytes.length < 2) return null;
                 int length = bytes[1] & 0xff;
-                host = new String(bytes, 2, length);
+                if (length == 0) throw new IllegalArgumentException("Empty target hostname");
+                if (bytes.length < length + 4) return null;
+                host = new String(bytes, 2, length, java.nio.charset.StandardCharsets.US_ASCII);
                 port = ((bytes[length + 2] & 0xff) << 8) + (bytes[length + 3] & 0xff);
                 subsequentDataLength = bytes.length - 4 - length;
                 break;
             case Socks5.ATYP_IPV6:
+                if (bytes.length < 19) return null;
                 atyp = ShadowSocksRequest.Type.IPV6;
                 host = String.format(
                         "%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x", bytes[1] & 0xff

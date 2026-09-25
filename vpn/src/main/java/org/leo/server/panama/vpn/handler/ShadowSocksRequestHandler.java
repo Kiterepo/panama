@@ -1,20 +1,17 @@
 package org.leo.server.panama.vpn.handler;
 
-import com.google.common.cache.Cache;
+import io.netty.util.AttributeKey;
+import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.Channel;
-import org.apache.log4j.Logger;
 import org.leo.server.panama.core.connector.impl.TCPRequest;
 import org.leo.server.panama.core.handler.RequestHandler;
 import org.leo.server.panama.vpn.configuration.ShadowSocksConfiguration;
 import org.leo.server.panama.vpn.proxy.TCPProxy;
 import org.leo.server.panama.vpn.proxy.factory.ShadowSocksProxyFactory;
-import org.leo.server.panama.vpn.util.LocalCacheFactory;
 
 public class ShadowSocksRequestHandler implements RequestHandler<TCPRequest> {
-    private final static Logger log = Logger.getLogger(AgentShadowSocksRequestHandler.class);
-
-    // 请求和代理缓存
-    private Cache<Channel, TCPProxy> channel2ProxyCache = LocalCacheFactory.createCache(5 * 60 * 1000, 20000);
+    // Cipher and destination state belong to the connection, never to an expiring cache.
+    private static final AttributeKey<TCPProxy> PROXY = AttributeKey.valueOf(ShadowSocksRequestHandler.class, "proxy");
 
     private ShadowSocksConfiguration shadowSocksConfiguration;
     public ShadowSocksRequestHandler(ShadowSocksConfiguration shadowSocksConfiguration) {
@@ -29,16 +26,22 @@ public class ShadowSocksRequestHandler implements RequestHandler<TCPRequest> {
     }
 
     protected void close(Channel channel) {
-        channel2ProxyCache.invalidate(channel);
+        TCPProxy proxy = channel.attr(PROXY).getAndSet(null);
+        if (proxy != null) proxy.close();
+    }
+
+    @Override
+    public void onClose(ChannelHandlerContext ctx) {
+        close(ctx.channel());
     }
 
     @Override
     public void doRequest(TCPRequest request) {
         Channel channel = request.getChannelHandlerContext().channel();
-        TCPProxy proxy = channel2ProxyCache.getIfPresent(channel);
+        TCPProxy proxy = channel.attr(PROXY).get();
         if (null == proxy) {
             proxy = createProxy(channel, shadowSocksConfiguration);
-            channel2ProxyCache.put(channel, proxy);
+            channel.attr(PROXY).set(proxy);
         }
 
         proxy.doProxy(request.getData());

@@ -10,4 +10,7 @@ public interface Proxy {
      * @param data
      */
     void doProxy(byte []data);
+
+    default void close() {
+    }
 }

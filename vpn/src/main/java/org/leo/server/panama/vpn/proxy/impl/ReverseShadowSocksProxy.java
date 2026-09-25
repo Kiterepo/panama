@@ -29,13 +29,18 @@ public class ReverseShadowSocksProxy extends ShadowSocksProxy {
     }
 
     @Override
+    protected boolean useTransportBackpressure() {
+        return false;
+    }
+
+    @Override
     protected void send2Client(byte[] data) {
         data = wrapper.wrap(data);
 
         // 返回的结果会添加tag标记，此tag为代理请求的tag
         clientChannel.write(appendTagFunc.apply(data));
         clientChannel.flush();
-        log.info("client <----------------  proxy " + data.length + " byte");
+        if (log.isDebugEnabled()) log.debug("client <----------------  proxy " + data.length + " byte");
     }
 
     @Override

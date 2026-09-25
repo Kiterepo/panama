@@ -22,39 +22,54 @@ public abstract class AbstractClient implements Client {
             return this;
         }
 
+        try {
+            connectAsync(inetSocketAddress, null).sync();
+            return this;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            close();
+            return null;
+        } catch (Exception e) {
+            close();
+            return null;
+        }
+    }
+
+    /** Non-blocking connection path for event-loop callers. */
+    public ChannelFuture connectAsync(InetSocketAddress address,
+            io.netty.resolver.AddressResolverGroup<InetSocketAddress> resolver) {
         Bootstrap bootstrap = new Bootstrap();
-        bootstrap.group(workGroup).
-                channel(NioSocketChannel.class).
-                handler(new ChannelInitializer<NioSocketChannel>() {
+        bootstrap.group(workGroup).channel(NioSocketChannel.class)
+                .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 10000)
+                .option(ChannelOption.TCP_NODELAY, true)
+                .handler(new ChannelInitializer<NioSocketChannel>() {
                     @Override
                     protected void initChannel(NioSocketChannel ch) throws Exception {
                         setupPipeline(ch.pipeline());
                     }
                 });
-        try {
-            close = false;
-            connectFuture = bootstrap.connect(inetSocketAddress).sync();
-            connectFuture.addListener((future) -> {
-//                System.out.println("operationComplete");
-            });
-        } catch (Exception e) {
-            e.printStackTrace();
-            close = true;
-            return null;
-        }
-
-        return this;
+        if (resolver != null) bootstrap.resolver(resolver);
+        close = false;
+        connectFuture = bootstrap.connect(address);
+        connectFuture.addListener(future -> {
+            if (!future.isSuccess()) close = true;
+        });
+        return connectFuture;
     }
 
     protected abstract void setupPipeline(ChannelPipeline pipeline);
 
     @Override
     public void send(byte []data, int timeout) {
-        try {
-            connectFuture.channel().writeAndFlush(Unpooled.wrappedBuffer(data));
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
+        ChannelFuture connection = connectFuture;
+        if (connection == null || close || data.length == 0) return;
+        // Keep writes ordered behind connection establishment; never block an event loop.
+        connection.addListener((ChannelFutureListener) future -> {
+            if (future.isSuccess() && future.channel().isActive()) {
+                future.channel().writeAndFlush(Unpooled.wrappedBuffer(data))
+                        .addListener(ChannelFutureListener.CLOSE_ON_FAILURE);
+            }
+        });
     }
 
     @Override
@@ -68,13 +83,11 @@ public abstract class AbstractClient implements Client {
 
     @Override
     public void close() {
-        try {
-            connectFuture.channel().close().sync();
-        } catch (Exception e) {
-            e.printStackTrace();
-        } finally {
-            close = true;
-            workGroup = null;
+        close = true;
+        ChannelFuture connection = connectFuture;
+        if (connection != null) {
+            connection.cancel(false);
+            connection.channel().close();
         }
     }
 

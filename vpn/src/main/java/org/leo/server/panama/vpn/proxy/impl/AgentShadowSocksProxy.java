@@ -34,12 +34,13 @@ public class AgentShadowSocksProxy extends AbstractShadowSocksProxy {
         if (!shadowSocksConfiguration.isProxyEqualsCurrent()) {
             // 协议不一致，则直接解密后再加密返回给客户端
             data = agentWrapper.unwrap(data);
+            if (data.length == 0) return;
             data = wrapper.wrap(data);
         }
 
         clientChannel.write(Unpooled.wrappedBuffer(data));
         clientChannel.flush();
-        log.info("client <----------------  proxy " + data.length + " byte");
+        if (log.isDebugEnabled()) log.debug("client <----------------  proxy " + data.length + " byte");
     }
 
     @Override
@@ -50,7 +51,7 @@ public class AgentShadowSocksProxy extends AbstractShadowSocksProxy {
     }
 
     protected void doProxy(byte []data, String target, int port) {
-        log.info("client ---------------->  proxy " + data.length + " byte");
+        if (log.isDebugEnabled()) log.debug("client ---------------->  proxy " + data.length + " byte");
 
         byte []decryptData = null;
         if (shadowSocksConfiguration.isProxyEqualsCurrent()) {
@@ -59,6 +60,7 @@ public class AgentShadowSocksProxy extends AbstractShadowSocksProxy {
         } else {
             // 直接解密然后加密转发
             decryptData = wrapper.unwrap(data);
+            if (decryptData.length == 0) return;
             decryptData = agentWrapper.wrap(decryptData);
         }
 
